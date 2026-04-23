@@ -8,18 +8,13 @@ OWNER_ID = 6413979646
 GROUP_ID = -1002884712338
 BOT_USERNAME = os.getenv("BOT_USERNAME", "your_bot_username")
 
-DB_PATH = "airdrop.db"
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+conn = sqlite3.connect("airdrop.db", check_same_thread=False)
 cur = conn.cursor()
 
-# -------------------------
-# DATABASE SETUP
-# -------------------------
+# ---------------- DATABASE ----------------
 cur.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
-    username TEXT,
-    full_name TEXT,
     balance INTEGER DEFAULT 0,
     referrals INTEGER DEFAULT 0,
     invited_by INTEGER,
@@ -31,129 +26,73 @@ CREATE TABLE IF NOT EXISTS users (
 
 cur.execute("""
 CREATE TABLE IF NOT EXISTS channels (
-    id INTEGER PRIMARY KEY,
-    channel_username TEXT NOT NULL
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT
 )
 """)
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+)
+""")
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS withdraws (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    amount INTEGER,
+    wallet TEXT
+)
+""")
+
 conn.commit()
 
+# ---------------- SETTINGS ----------------
+def get_setting(key, default):
+    cur.execute("SELECT value FROM settings WHERE key=?", (key,))
+    row = cur.fetchone()
+    return int(row[0]) if row else default
 
-def ensure_column(name, ddl):
-    try:
-        cur.execute(f"ALTER TABLE users ADD COLUMN {name} {ddl}")
-        conn.commit()
-    except:
-        pass
-
-
-ensure_column("username", "TEXT")
-ensure_column("full_name", "TEXT")
-ensure_column("task_done", "INTEGER DEFAULT 0")
-ensure_column("ref_paid", "INTEGER DEFAULT 0")
-
-
-def seed_channels():
-    cur.execute("SELECT COUNT(*) FROM channels")
-    count = cur.fetchone()[0]
-    if count == 0:
-        default_channels = [
-            (1, "@channel1"),
-            (2, "@channel2"),
-            (3, "@channel3"),
-            (4, "@channel4"),
-        ]
-        cur.executemany(
-            "INSERT INTO channels (id, channel_username) VALUES (?, ?)",
-            default_channels
-        )
-        conn.commit()
-
-
-seed_channels()
-
-
-# -------------------------
-# HELPERS
-# -------------------------
-def is_admin(user_id: int) -> bool:
-    return user_id == OWNER_ID
-
-
-def get_channels():
-    cur.execute("SELECT id, channel_username FROM channels ORDER BY id ASC")
-    return cur.fetchall()
-
-
-def set_channel(channel_id: int, username: str):
-    cur.execute(
-        "UPDATE channels SET channel_username=? WHERE id=?",
-        (username, channel_id)
-    )
+def set_setting(key, value):
+    cur.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, value))
     conn.commit()
 
+TASK_REWARD = get_setting("task_reward", 80)
+REF_REWARD = get_setting("ref_reward", 30)
+MIN_WITHDRAW = get_setting("min_withdraw", 1000)
 
-def get_user(user_id: int):
-    cur.execute("""
-        SELECT user_id, username, full_name, balance, referrals, invited_by, wallet, task_done, ref_paid
-        FROM users WHERE user_id=?
-    """, (user_id,))
-    return cur.fetchone()
+# ---------------- HELPERS ----------------
+def is_admin(uid): return uid == OWNER_ID
 
-
-def main_menu(user_id: int):
-    rows = [
+def main_menu(uid):
+    menu = [
         ["🎁 Airdrop", "👥 Refer"],
         ["✅ Tasks", "💰 Balance"],
         ["🏦 Wallet", "💸 Withdraw"],
         ["📢 Channels", "❓ Help"],
     ]
-
-    if is_admin(user_id):
-        rows.append(["⚙️ Admin Panel"])
-
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
-
+    if is_admin(uid):
+        menu.append(["⚙️ Admin Panel"])
+    return ReplyKeyboardMarkup(menu, resize_keyboard=True)
 
 def admin_menu():
-    return ReplyKeyboardMarkup(
-        [
-            ["📋 View Channels"],
-            ["✏️ Edit Channel 1", "✏️ Edit Channel 2"],
-            ["✏️ Edit Channel 3", "✏️ Edit Channel 4"],
-            ["🔙 Back"],
-        ],
-        resize_keyboard=True
-    )
+    return ReplyKeyboardMarkup([
+        ["📋 Channels", "➕ Add Channel"],
+        ["➖ Delete Channel"],
+        ["🎁 Edit Bonus"],
+        ["👤 User Stats"],
+        ["💸 Withdraw Logs"],
+        ["🔙 Back"]
+    ], resize_keyboard=True)
 
-
-async def joined_all_channels(bot, user_id: int) -> bool:
-    channels = get_channels()
-    for _, channel in channels:
-        try:
-            member = await bot.get_chat_member(channel, user_id)
-            if member.status not in ["member", "administrator", "creator"]:
-                return False
-        except:
-            return False
-    return True
-
-
-# -------------------------
-# START
-# -------------------------
+# ---------------- START ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ref = context.args[0] if context.args else None
 
-    cur.execute("""
-        INSERT OR IGNORE INTO users(user_id, username, full_name)
-        VALUES (?, ?, ?)
-    """, (user.id, user.username, user.full_name))
-    conn.commit()
-
-    cur.execute("""
-        UPDATE users SET username=?, full_name=? WHERE user_id=?
-    """, (user.username, user.full_name, user.id))
+    cur.execute("INSERT OR IGNORE INTO users(user_id) VALUES(?)", (user.id,))
     conn.commit()
 
     if ref:
@@ -161,302 +100,152 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ref = int(ref)
             if ref != user.id:
                 cur.execute("SELECT invited_by FROM users WHERE user_id=?", (user.id,))
-                row = cur.fetchone()
-                if row and row[0] is None:
+                if cur.fetchone()[0] is None:
                     cur.execute("UPDATE users SET invited_by=? WHERE user_id=?", (ref, user.id))
                     conn.commit()
-        except:
-            pass
+        except: pass
 
     await update.message.reply_text(
-        "🎁 Welcome to Airdrop Bot\n\n"
-        "• Channel 4 ခုလုံး Join ပြီးမှ 80 MMK ရမယ်\n"
-        "• Refer 1 ယောက် = 30 MMK\n"
-        "• referred user က channel အကုန် join ပြီး claim လုပ်မှ 30 MMK ရမယ်\n"
-        "• Minimum Withdraw = 1000 MMK\n\n"
-        "👇 Menu ကိုရွေးပါ",
+        "🎁 Airdrop Bot\n\nJoin Channels → Earn Money",
         reply_markup=main_menu(user.id)
     )
 
+# ---------------- MESSAGE ----------------
+async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    uid = update.effective_user.id
 
-# -------------------------
-# MESSAGE HANDLER
-# -------------------------
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    user = update.effective_user
-    user_id = user.id
-
-    cur.execute("""
-        INSERT OR IGNORE INTO users(user_id, username, full_name)
-        VALUES (?, ?, ?)
-    """, (user.id, user.username, user.full_name))
-    cur.execute("""
-        UPDATE users SET username=?, full_name=? WHERE user_id=?
-    """, (user.username, user.full_name, user.id))
-    conn.commit()
-
-    # -------------------------
-    # ADMIN INPUT MODE
-    # -------------------------
-    if context.user_data.get("edit_channel_id"):
-        if not is_admin(user_id):
-            context.user_data["edit_channel_id"] = None
-            await update.message.reply_text("❌ Admin only.", reply_markup=main_menu(user_id))
-            return
-
-        channel_id = context.user_data.get("edit_channel_id")
-        new_channel = text
-
-        if not (new_channel.startswith("@") or new_channel.startswith("-100")):
-            await update.message.reply_text(
-                "❗ Channel username သို့ channel id မှန်မှန်ထည့်ပါ\n\n"
-                "ဥပမာ:\n"
-                "@mychannel\n"
-                "-1001234567890"
-            )
-            return
-
-        set_channel(channel_id, new_channel)
-        context.user_data["edit_channel_id"] = None
-
-        await update.message.reply_text(
-            f"✅ Channel {channel_id} ကို {new_channel} နဲ့ပြောင်းပြီးပါပြီ",
-            reply_markup=admin_menu()
-        )
+    # ---------- ADMIN INPUT ----------
+    if context.user_data.get("add_channel"):
+        cur.execute("INSERT INTO channels(username) VALUES(?)", (text,))
+        conn.commit()
+        context.user_data.clear()
+        await update.message.reply_text("✅ Channel added", reply_markup=admin_menu())
         return
 
-    # -------------------------
-    # NORMAL MENU
-    # -------------------------
-    if text == "🎁 Airdrop":
-        await update.message.reply_text(
-            "🎁 Airdrop Information\n\n"
-            "✅ Channel 4 ခုလုံး Join ပြီးမှ 80 MMK ရမယ်\n"
-            "👥 Share Link နဲ့ခေါ်ရင် 30 MMK ရမယ်\n"
-            "💸 1000 MMK ပြည့်ရင် Withdraw လုပ်လို့ရမယ်\n"
-            "🏦 WavePay / KPay နဲ့ထုတ်နိုင်မယ်"
-        )
+    if context.user_data.get("del_channel"):
+        cur.execute("DELETE FROM channels WHERE username=?", (text,))
+        conn.commit()
+        context.user_data.clear()
+        await update.message.reply_text("❌ Channel deleted", reply_markup=admin_menu())
+        return
 
-    elif text == "👥 Refer":
-        link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
-        row = get_user(user_id)
-        referrals = row[4] if row else 0
-        await update.message.reply_text(
-            f"👥 Referral Program\n\n"
-            f"💵 Refer Reward: 30 MMK\n"
-            f"👤 Total Referrals: {referrals}\n\n"
-            f"🔗 Your Referral Link:\n{link}\n\n"
-            f"📌 သင်ခေါ်တဲ့ user က Channel 4 ခုလုံး Join ပြီး Claim လုပ်မှ 30 MMK ရမယ်"
-        )
+    if context.user_data.get("edit_bonus"):
+        try:
+            t, r, m = map(int, text.split())
+            set_setting("task_reward", t)
+            set_setting("ref_reward", r)
+            set_setting("min_withdraw", m)
+            context.user_data.clear()
+            await update.message.reply_text("✅ Bonus updated", reply_markup=admin_menu())
+        except:
+            await update.message.reply_text("❗ Format: task refer minwithdraw")
+        return
 
-    elif text == "📢 Channels":
-        channels = get_channels()
-        msg = "📢 Task Channels\n\n"
-        for ch_id, ch_name in channels:
-            msg += f"{ch_id}. {ch_name}\n"
-        msg += "\nပြီးရင် ✅ Tasks ကိုနှိပ်ပြီး Check လုပ်ပါ"
-        await update.message.reply_text(msg)
+    # ---------- USER ----------
+    if text == "📢 Channels":
+        cur.execute("SELECT username FROM channels")
+        chs = cur.fetchall()
+        msg = "\n".join([c[0] for c in chs])
+        await update.message.reply_text(msg or "No channels")
 
     elif text == "✅ Tasks":
-        channels = get_channels()
-        msg = "✅ Task List\n\n"
-        for ch_id, ch_name in channels:
-            msg += f"{ch_id}. Join {ch_name}\n"
-        msg += "\nပြီးရင် Check လို့ရိုက်ပါ"
-        await update.message.reply_text(msg)
+        await update.message.reply_text("Join all channels then type Check")
 
     elif text.lower() == "check":
-        row = get_user(user_id)
-        if not row:
-            await update.message.reply_text("❌ User data not found.")
+        global TASK_REWARD, REF_REWARD
+        TASK_REWARD = get_setting("task_reward", 80)
+        REF_REWARD = get_setting("ref_reward", 30)
+
+        cur.execute("SELECT task_done, invited_by, ref_paid FROM users WHERE user_id=?", (uid,))
+        row = cur.fetchone()
+
+        if row[0]:
+            await update.message.reply_text("Already claimed")
             return
 
-        task_done = row[7]
-        invited_by = row[5]
-        ref_paid = row[8]
+        cur.execute("UPDATE users SET balance=balance+?, task_done=1 WHERE user_id=?", (TASK_REWARD, uid))
 
-        if task_done == 1:
-            await update.message.reply_text("❗ Task reward already claimed.")
-            return
-
-        ok = await joined_all_channels(context.bot, user_id)
-        if not ok:
-            await update.message.reply_text("❗ Channel 4 ခုလုံး join မလုပ်သေးပါ။")
-            return
-
-        cur.execute(
-            "UPDATE users SET balance=balance+80, task_done=1 WHERE user_id=?",
-            (user_id,)
-        )
-
-        if invited_by and ref_paid == 0:
-            cur.execute(
-                "UPDATE users SET balance=balance+30, referrals=referrals+1 WHERE user_id=?",
-                (invited_by,)
-            )
-            cur.execute(
-                "UPDATE users SET ref_paid=1 WHERE user_id=?",
-                (user_id,)
-            )
+        if row[1] and not row[2]:
+            cur.execute("UPDATE users SET balance=balance+?, referrals=referrals+1 WHERE user_id=?", (REF_REWARD, row[1]))
+            cur.execute("UPDATE users SET ref_paid=1 WHERE user_id=?", (uid,))
 
         conn.commit()
-        await update.message.reply_text("✅ Channel 4 ခုလုံး Join ပြီးပါပြီ။ 80 MMK ထည့်ပြီးပါပြီ။")
+        await update.message.reply_text(f"✅ +{TASK_REWARD} MMK")
 
     elif text == "💰 Balance":
-        row = get_user(user_id)
-        if not row:
-            await update.message.reply_text("❌ User data not found.")
-            return
-
-        balance = row[3]
-        referrals = row[4]
-        wallet = row[6] or "Not set"
-
-        await update.message.reply_text(
-            f"💰 Your Balance: {balance} MMK\n"
-            f"👥 Referrals: {referrals}\n"
-            f"🏦 Wallet: {wallet}\n\n"
-            f"📌 Minimum Withdraw: 1000 MMK"
-        )
+        cur.execute("SELECT balance FROM users WHERE user_id=?", (uid,))
+        bal = cur.fetchone()[0]
+        await update.message.reply_text(f"💰 {bal} MMK")
 
     elif text == "🏦 Wallet":
-        context.user_data["waiting_wallet"] = True
-        await update.message.reply_text(
-            "🏦 Wallet Setup\n\n"
-            "WavePay / KPay နံပါတ်ကို အခုရိုက်ပို့ပါ။"
-        )
+        context.user_data["wallet"] = True
+        await update.message.reply_text("Send Wave/Kpay")
 
-    elif context.user_data.get("waiting_wallet"):
-        wallet = text
-        cur.execute("UPDATE users SET wallet=? WHERE user_id=?", (wallet, user_id))
+    elif context.user_data.get("wallet"):
+        cur.execute("UPDATE users SET wallet=? WHERE user_id=?", (text, uid))
         conn.commit()
-        context.user_data["waiting_wallet"] = False
-        await update.message.reply_text("✅ Wallet saved successfully.")
+        context.user_data.clear()
+        await update.message.reply_text("Saved")
 
     elif text == "💸 Withdraw":
-        row = get_user(user_id)
-        if not row:
-            await update.message.reply_text("❌ User data not found.")
+        MIN = get_setting("min_withdraw", 1000)
+        cur.execute("SELECT balance,wallet FROM users WHERE user_id=?", (uid,))
+        bal, w = cur.fetchone()
+
+        if bal < MIN:
+            await update.message.reply_text("Not enough balance")
             return
 
-        balance = row[3]
-        wallet = row[6]
-        username = row[1] or "NoUsername"
-        full_name = row[2] or "NoName"
-
-        if balance < 1000:
-            await update.message.reply_text("❗ Withdraw လုပ်ဖို့ 1000 MMK မပြည့်သေးပါ။")
-            return
-
-        if not wallet:
-            await update.message.reply_text("❗ အရင်ဆုံး WavePay / KPay wallet ချိတ်ပေးပါ။")
-            return
-
-        msg = (
-            "📥 Withdraw Request\n\n"
-            f"👤 Name: {full_name}\n"
-            f"🆔 User ID: {user_id}\n"
-            f"📛 Username: @{username}\n"
-            f"🏦 Wallet: {wallet}\n"
-            f"💰 Amount: {balance} MMK"
-        )
-
-        await context.bot.send_message(chat_id=GROUP_ID, text=msg)
-
-        cur.execute("UPDATE users SET balance=0 WHERE user_id=?", (user_id,))
+        cur.execute("INSERT INTO withdraws(user_id,amount,wallet) VALUES(?,?,?)", (uid, bal, w))
+        cur.execute("UPDATE users SET balance=0 WHERE user_id=?", (uid,))
         conn.commit()
 
-        await update.message.reply_text("✅ Withdraw request ပို့ပြီးပါပြီ။ Admin စစ်ပြီး ငွေလွှဲပေးပါမယ်။")
+        await context.bot.send_message(GROUP_ID, f"Withdraw\nID:{uid}\n{w}\n{bal}")
+        await update.message.reply_text("Request sent")
 
-    elif text == "❓ Help":
-        await update.message.reply_text(
-            "❓ Help\n\n"
-            "1. 📢 Channels ထဲက Channel 4 ခုလုံး join လုပ်ပါ\n"
-            "2. ✅ Tasks → Check လုပ်ပါ\n"
-            "3. 80 MMK ရမယ်\n"
-            "4. 👥 Refer link share လုပ်ပါ\n"
-            "5. referred user က claim လုပ်မှ 30 MMK ရမယ်\n"
-            "6. 1000 MMK ပြည့်ရင် 💸 Withdraw လုပ်ပါ"
-        )
-
-    # -------------------------
-    # ADMIN PANEL
-    # -------------------------
+    # ---------- ADMIN ----------
     elif text == "⚙️ Admin Panel":
-        if not is_admin(user_id):
-            await update.message.reply_text("❌ Admin only.")
-            return
+        if is_admin(uid):
+            await update.message.reply_text("Admin Panel", reply_markup=admin_menu())
 
+    elif text == "📋 Channels":
+        cur.execute("SELECT username FROM channels")
+        msg = "\n".join([c[0] for c in cur.fetchall()])
+        await update.message.reply_text(msg or "Empty", reply_markup=admin_menu())
+
+    elif text == "➕ Add Channel":
+        context.user_data["add_channel"] = True
+        await update.message.reply_text("Send channel username")
+
+    elif text == "➖ Delete Channel":
+        context.user_data["del_channel"] = True
+        await update.message.reply_text("Send channel username to delete")
+
+    elif text == "🎁 Edit Bonus":
         await update.message.reply_text(
-            "⚙️ Admin Panel",
-            reply_markup=admin_menu()
+            "Format:\nTask Refer MinWithdraw\n\nExample:\n80 30 1000"
         )
+        context.user_data["edit_bonus"] = True
 
-    elif text == "📋 View Channels":
-        if not is_admin(user_id):
-            await update.message.reply_text("❌ Admin only.")
-            return
+    elif text == "👤 User Stats":
+        cur.execute("SELECT COUNT(*) FROM users")
+        total = cur.fetchone()[0]
+        cur.execute("SELECT SUM(balance) FROM users")
+        bal = cur.fetchone()[0] or 0
+        await update.message.reply_text(f"Users: {total}\nTotal Balance: {bal}")
 
-        channels = get_channels()
-        msg = "📋 Current Channels\n\n"
-        for ch_id, ch_name in channels:
-            msg += f"{ch_id}. {ch_name}\n"
-        await update.message.reply_text(msg, reply_markup=admin_menu())
-
-    elif text == "✏️ Edit Channel 1":
-        if not is_admin(user_id):
-            await update.message.reply_text("❌ Admin only.")
-            return
-        context.user_data["edit_channel_id"] = 1
-        await update.message.reply_text("Channel 1 အသစ်ကိုပို့ပါ\nဥပမာ - @mychannel", reply_markup=admin_menu())
-
-    elif text == "✏️ Edit Channel 2":
-        if not is_admin(user_id):
-            await update.message.reply_text("❌ Admin only.")
-            return
-        context.user_data["edit_channel_id"] = 2
-        await update.message.reply_text("Channel 2 အသစ်ကိုပို့ပါ\nဥပမာ - @mychannel", reply_markup=admin_menu())
-
-    elif text == "✏️ Edit Channel 3":
-        if not is_admin(user_id):
-            await update.message.reply_text("❌ Admin only.")
-            return
-        context.user_data["edit_channel_id"] = 3
-        await update.message.reply_text("Channel 3 အသစ်ကိုပို့ပါ\nဥပမာ - @mychannel", reply_markup=admin_menu())
-
-    elif text == "✏️ Edit Channel 4":
-        if not is_admin(user_id):
-            await update.message.reply_text("❌ Admin only.")
-            return
-        context.user_data["edit_channel_id"] = 4
-        await update.message.reply_text("Channel 4 အသစ်ကိုပို့ပါ\nဥပမာ - @mychannel", reply_markup=admin_menu())
+    elif text == "💸 Withdraw Logs":
+        cur.execute("SELECT user_id,amount FROM withdraws ORDER BY id DESC LIMIT 10")
+        logs = "\n".join([f"{u} - {a}" for u,a in cur.fetchall()])
+        await update.message.reply_text(logs or "No logs")
 
     elif text == "🔙 Back":
-        context.user_data["edit_channel_id"] = None
-        await update.message.reply_text(
-            "🔙 Main Menu",
-            reply_markup=main_menu(user_id)
-        )
+        await update.message.reply_text("Back", reply_markup=main_menu(uid))
 
-    else:
-        await update.message.reply_text(
-            "ရွေးချယ်စရာ keyboard ကိုသုံးပါ။",
-            reply_markup=main_menu(user_id)
-        )
+# ---------------- RUN ----------------
+app = ApplicationBuilder().token(TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(MessageHandler(filters.TEXT, handle))
 
-
-def main():
-    if not TOKEN:
-        raise ValueError("BOT_TOKEN env var is missing")
-
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    print("Bot is running...")
-    app.run_polling()
-
-
-if __name__ == "__main__":
-    main()
+app.run_polling()
