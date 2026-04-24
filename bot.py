@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import asyncio
 from flask import Flask, request
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
@@ -32,6 +33,7 @@ username TEXT UNIQUE
 
 conn.commit()
 
+
 def menu(uid):
     rows = [
         ["🎁 Airdrop", "👥 Refer"],
@@ -43,17 +45,21 @@ def menu(uid):
         rows.append(["⚙️ Admin"])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
+
 def ensure(uid):
     cur.execute("INSERT OR IGNORE INTO users(user_id) VALUES(?)", (uid,))
     conn.commit()
+
 
 def get_user(uid):
     cur.execute("SELECT * FROM users WHERE user_id=?", (uid,))
     return cur.fetchone()
 
-def channels():
+
+def get_channels():
     cur.execute("SELECT username FROM channels")
     return [x[0] for x in cur.fetchall()]
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
@@ -72,6 +78,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     await update.message.reply_text("🎁 Welcome", reply_markup=menu(u.id))
+
 
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -96,49 +103,34 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         await update.message.reply_text("Saved")
 
-    elif text == "💸 Withdraw":
-        u = get_user(uid)
-        if u[1] < 1000:
-            await update.message.reply_text("Min 1000")
-            return
-        await context.bot.send_message(GROUP_ID, f"{uid}\n{u[4]}\n{u[1]}")
-        cur.execute("UPDATE users SET balance=0 WHERE user_id=?", (uid,))
-        conn.commit()
-        await update.message.reply_text("Sent")
-
-    elif text == "⚙️ Admin" and uid == OWNER_ID:
-        context.user_data["add"] = True
-        await update.message.reply_text("Send channel")
-
-    elif context.user_data.get("add"):
-        cur.execute("INSERT OR IGNORE INTO channels(username) VALUES(?)", (text,))
-        conn.commit()
-        context.user_data.clear()
-        await update.message.reply_text("Added")
-
     else:
         await update.message.reply_text("OK", reply_markup=menu(uid))
 
 
+# ---------- TELEGRAM APP ----------
 app_tg = ApplicationBuilder().token(TOKEN).build()
 app_tg.add_handler(CommandHandler("start", start))
 app_tg.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
 
+
+# ---------- FLASK ----------
 flask_app = Flask(__name__)
+
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
 
 @flask_app.route("/")
 def home():
-    return "running"
+    return "Bot Running"
 
 @flask_app.route(f"/{TOKEN}", methods=["POST"])
-def hook():
+def webhook():
     update = Update.de_json(request.get_json(force=True), app_tg.bot)
-    import asyncio
-    asyncio.run(app_tg.process_update(update))
+    loop.run_until_complete(app_tg.process_update(update))
     return "ok"
 
+
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(app_tg.initialize())
-    asyncio.run(app_tg.bot.set_webhook(f"{WEBHOOK_URL}/{TOKEN}"))
+    loop.run_until_complete(app_tg.initialize())
+    loop.run_until_complete(app_tg.bot.set_webhook(f"{WEBHOOK_URL}/{TOKEN}"))
     flask_app.run(host="0.0.0.0", port=PORT)
